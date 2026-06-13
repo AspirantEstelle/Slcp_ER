@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 import urllib.parse
 import asyncio
+from llm_handler import analyze_player_stats, answer_game_question
 
 # --- 1. 환경변수 및 기본 설정 ---
 load_dotenv()
@@ -36,7 +37,7 @@ STATUS_LIST = [
 CHARACTER_MAP = {}
 ITEM_NAME_MAP = {} # 아이템 이름 -> 아이템 코드 
 ITEM_DATA_MAP = {} # 아이템 코드 -> 스탯 데이터 저장소
-CURRENT_SEASON = 37
+CURRENT_SEASON = 39
 
 # --- 3. 백그라운드 작업 및 초기 설정 ---
 @tasks.loop(minutes=10)
@@ -191,7 +192,6 @@ async def er_stats_overall(ctx, *, nickname=None):
             rank = overall_stat.get('rank', 0)
             rank_percent = overall_stat.get('rankPercent', 0)
             avg_tk = overall_stat.get('averageTeamKills', overall_stat.get('totalTeamKills', 0) / max(total_games, 1))
-            
             char_stats = overall_stat.get('characterStats', [])
             if char_stats:
                 most_played = max(char_stats, key=lambda x: x.get('totalGames', 0))
@@ -199,6 +199,22 @@ async def er_stats_overall(ctx, *, nickname=None):
                 most_char_name = CHARACTER_MAP.get(most_char_code, "알 수 없음")
             else:
                 most_char_name = "기록 없음"
+            
+            # 뭐시발
+            async with ctx.typing():
+                from llm_handler import analyze_player_stats
+                ai_analysis = await analyze_player_stats(nickname, stats_data)
+            stats_data = {
+                'total_games': total_games,
+                'win_rate': win_rate,
+                'mmr': mmr,
+                'rank': rank,
+                'avg_tk': avg_tk,
+                'main_character': most_char_name
+            }
+            from llm_handler import analyze_player_stats
+            ai_analysis = await analyze_player_stats(nickname, stats_data)
+            # 뭐시발끝
             
             # [STEP 5] 랭크 전용 결과 임베드 출력
             embed = discord.Embed(
@@ -211,7 +227,13 @@ async def er_stats_overall(ctx, *, nickname=None):
             embed.add_field(name="판수", value=f"**{total_games}**판", inline=True)
             embed.add_field(name="승률", value=f"**{win_rate:.1f}**%", inline=True)
             embed.add_field(name="평균 TK", value=f"**{avg_tk:.1f}**", inline=True)
+            embed.add_field(name="니체 전적 분석 및 피드백", value=ai_analysis, inline=False)
             await ctx.send(embed=embed)
+
+@bot.command(name='질문')
+async def ask(ctx, *, question=None):
+    answer = await answer_game_question(question)
+    await ctx.send(answer)
 
 @bot.command(name='아이템')
 async def item_stats(ctx, *, item_name=None):
@@ -254,19 +276,20 @@ async def item_stats(ctx, *, item_name=None):
     # 2. 유저가 읽기 편하게 영문 스탯키를 한글로 변환
     stat_translation = {
         "attackPower": "공격력",
-        'attackPowerByLv': "레벨당 공격력", 
+        'attackPowerByLv': "레벨 당 공격력", 
         "defense": "방어력",
-        'defenseByLv': "레벨당 방어력",
-        'skillAmp': "스킬증폭", 
-        'skillAmpByLevel': "레벨당 스킬증폭", 
-        'skillAmpRatio': "스킬증폭(%)", 
+        'defenseByLv': "레벨 당 방어력",
+        'skillAmp': "스킬 증폭", 
+        'skillAmpByLevel': "레벨 당 스킬 증폭", 
+        'skillAmpRatio': "스킬 증폭(%)",
+        'uniqueSkillAmpRatio': "스킬 증폭(고유, %)", 
         'adaptiveForce': "적응형 능력치", 
-        'adaptiveForceByLevel': "레벨당 적응형 능력치", 
+        'adaptiveForceByLevel': "레벨 당 적응형 능력치", 
         "maxHp": "최대 체력",
-        'maxHpByLv': "레벨당 최대 체력", 
+        'maxHpByLv': "레벨 당 최대 체력", 
         "hpRegen": "체력 재생",
         "attackSpeedRatio": "공격 속도",
-        'attackSpeedRatioByLv': "레벨당 공격 속도",
+        'attackSpeedRatioByLv': "레벨 당 공격 속도",
         "criticalStrikeChance": "치명타 확률",
         "criticalStrikeDamage": "치명타 피해량",
         "preventCriticalStrikeDamaged": "치명타 피해 감소",
@@ -279,10 +302,13 @@ async def item_stats(ctx, *, item_name=None):
         'penetrationDefense': "방어력 관통", 
         'penetrationDefenseRatio': "방어력 관통(%)",  
         'slowResistRatio': "둔화 효과 저항",
-        'hpHealedIncreaseRatio': "치유 증가",
-        'healerGiveHpHealRatio': "치유 증가?",
+        'hpHealedIncreaseRatio': "받는 회복 증가",
+        'healerGiveHpHealRatio': "주는 회복 증가",
         'tacticalCooldownReduction': "전술스킬 쿨다운 감소",
+        'ultCooldownReduction': "궁극기 쿨다운 감소",
         "moveSpeed": "이동 속도",
+        'moveSpeedRatio': "이동 속도(%)", 
+        'uniqueMoveSpeed': "이동 속도(고유)", 
     }
 
     # 3. 데이터가 0이 아닌 스탯만 쏙쏙 뽑아내기
@@ -291,8 +317,8 @@ async def item_stats(ctx, *, item_name=None):
         val = item_info.get(stat_key, 0)
         if val != 0:
             # 소수점 데이터(예: 0.15)가 무한정 길어지는 걸 방지
-            if isinstance(val, float):
-                stats_text += f"**{stat_kor}**: {val:g}\n"
+            if isinstance(val, float) and stat_kor != 'moveSpeed':
+                stats_text += f"**{stat_kor}**: {100*val:g} %\n"
             else:
                 stats_text += f"**{stat_kor}**: {val}\n"
 
